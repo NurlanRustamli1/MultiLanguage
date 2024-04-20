@@ -1,0 +1,198 @@
+package az.expressbank.e24.activities;
+
+import android.app.ProgressDialog;
+import android.content.Context;
+import android.content.Intent;
+import android.content.pm.PackageInfo;
+import android.content.pm.PackageManager;
+import android.os.Bundle;
+import android.util.Log;
+import android.view.View;
+import android.view.Window;
+import android.view.WindowManager;
+
+import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
+import androidx.core.content.ContextCompat;
+import androidx.core.hardware.fingerprint.FingerprintManagerCompat;
+
+import az.expressbank.e24.App;
+import az.expressbank.e24.R;
+import az.expressbank.e24.databinding.ActivitySettingsBinding;
+import az.expressbank.e24.enums.Language;
+import az.expressbank.e24.fragments.bottomSheet.LanguageBottomSheetFragment;
+import az.expressbank.e24.locale.LocaleChanger;
+import az.expressbank.e24.models.network.DefaultParams;
+import az.expressbank.e24.models.network.DefaultRequest;
+import az.expressbank.e24.models.network.NotificationLangResponse;
+import az.expressbank.e24.utils.RootUtil;
+import io.reactivex.android.schedulers.AndroidSchedulers;
+import io.reactivex.disposables.CompositeDisposable;
+import io.reactivex.observers.DisposableSingleObserver;
+import io.reactivex.schedulers.Schedulers;
+
+public class SettingsActivity extends E24BaseActivity {
+    private static final String TAG = "SettingsActivity";
+    boolean comesFromSettings = false;
+    private ProgressDialog mProgressDialog;
+
+    @SuppressWarnings("FieldCanBeLocal")
+    private ActivitySettingsBinding binding;
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        RootUtil.alertAndCloseAppIfRooted(this);
+    }
+
+    @Override
+    public void onCreate(@Nullable Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+
+        binding = ActivitySettingsBinding.inflate(getLayoutInflater());
+
+        setContentView(binding.getRoot());
+
+        final Window window = this.getWindow();
+        window.clearFlags(WindowManager.LayoutParams.FLAG_TRANSLUCENT_STATUS);
+        window.addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS);
+        window.setStatusBarColor(ContextCompat.getColor(this, R.color.tab_bg));
+        try {
+            final PackageInfo packageInfo = getPackageManager().getPackageInfo(getPackageName(), 0);
+            binding.txtVersion.setText(getString(R.string.short_version_template, packageInfo.versionName));
+        } catch (PackageManager.NameNotFoundException e) {
+            e.printStackTrace();
+        }
+
+        comesFromSettings = getIntent().getBooleanExtra("comesFromSettings", false);
+
+        binding.switchTouchId.setChecked(App.getPref().getTouchid());
+
+        if (!checkFingerPrintSensorAvailable(getApplicationContext()) || comesFromSettings) {
+            binding.lytTouchId.setVisibility(View.GONE);
+        }
+
+        binding.lytLanguage.setOnClickListener(v -> {
+            final LanguageBottomSheetFragment languageBottomSheetFragment = new LanguageBottomSheetFragment();
+            languageBottomSheetFragment.show(getSupportFragmentManager(), "LanguageBottomSheetFragment");
+
+            languageBottomSheetFragment.setOnClickCallBackString(data -> {
+                if (data == null) return;
+
+                switch (data) {
+                    case Language.AZ:
+                        LocaleChanger.setAz(this);
+                        break;
+                    case Language.EN:
+                        LocaleChanger.setEn(this);
+                        break;
+                    case Language.RU:
+                        LocaleChanger.setRu(this);
+                        break;
+                }
+
+                final DefaultRequest defaultRequest = new DefaultRequest();
+                final DefaultParams defaultParams = new DefaultParams();
+                defaultParams.setCustomerId(App.getPref().getCustomerId());
+                defaultRequest.setDefaultParams(defaultParams);
+               // showProgressBar();
+                languageBottomSheetFragment.dismiss();
+                Log.e("SettingsTAG", "onCreate: "+App.getPref().getAppLang());
+
+
+                final DisposableSingleObserver<NotificationLangResponse> observer = new DisposableSingleObserver<>() {
+                    @Override
+                    public void onSuccess(@NonNull NotificationLangResponse notificationLangResponse) {
+                        hideProgressBar();
+                        final Intent intent = new Intent(SettingsActivity.this, SettingsActivity.class);
+                        if (!comesFromSettings) {
+                            intent.putExtra("comesFromSettings", true);
+                            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
+                        }
+                        startActivity(intent);
+                        finish();
+                    }
+
+                    @Override
+                    public void onError(@NonNull Throwable e) {
+                        hideProgressBar();
+                        Intent intent = new Intent(SettingsActivity.this, SettingsActivity.class);
+                        if (comesFromSettings) {
+                            intent.putExtra("comesFromSettings", true);
+                            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
+                        }
+                        startActivity(intent);
+                        finish();
+                    }
+                };
+
+                @NonNull final CompositeDisposable cd = new CompositeDisposable();
+                cd.add(App.getApiService()
+                        .pushNotificationChangeLang(defaultRequest, App.getPref().getAuthorizationToken())
+                        .subscribeOn(Schedulers.io())
+                        .observeOn(AndroidSchedulers.mainThread())
+                        .subscribeWith(observer));
+            });
+
+        });
+
+        binding.switchTouchId.setOnCheckedChangeListener((buttonView, isChecked) -> App.getPref().setTouchId(isChecked));
+
+        binding.imgGoBack.setOnClickListener(v -> {
+            Intent intent = new Intent(SettingsActivity.this, MainActivity.class);
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
+            if (comesFromSettings) {
+                intent.putExtra("page", "recreate_page");
+            } else {
+                intent.putExtra("page", "tab_more");
+            }
+            startActivity(intent);
+            finish();
+        });
+    }
+
+    @Override
+    public void onBackPressed() {
+        android.content.Intent intent = new android.content.Intent(SettingsActivity.this, MainActivity.class);
+        intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TASK | Intent.FLAG_ACTIVITY_NEW_TASK);
+        if (comesFromSettings) {
+            intent.putExtra("page", "recreate_page");
+        } else {
+            intent.putExtra("page", "tab_more");
+        }
+        startActivity(intent);
+        finish();
+    }
+
+    public static boolean checkFingerPrintSensorAvailable(Context context) {
+        FingerprintManagerCompat fingerprintManagerCompat = FingerprintManagerCompat.from(context);
+        return fingerprintManagerCompat.isHardwareDetected() && fingerprintManagerCompat.hasEnrolledFingerprints();
+    }
+
+//    @Override
+//    protected void attachBaseContext(Context newBase) {
+//        newBase = LocaleChanger.configureBaseContext(newBase);
+//        setLanguage(newBase, App.getPref().getAppLang());
+//        super.attachBaseContext(newBase);
+//    }
+
+    public void showProgressBar() {
+        this.getWindow().setFlags(WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE, WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE);
+        mProgressDialog = new ProgressDialog(SettingsActivity.this);
+        mProgressDialog.setIndeterminate(true);
+        mProgressDialog.setMessage(getString(R.string.loading_text));
+        mProgressDialog.setCanceledOnTouchOutside(false);
+        mProgressDialog.show();
+    }
+
+    public void hideProgressBar() {
+        try {
+            if (mProgressDialog != null && mProgressDialog.isShowing()) {
+                mProgressDialog.dismiss();
+                SettingsActivity.this.getWindow().clearFlags(WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE);
+            }
+        } catch (IllegalArgumentException e) {
+            Log.d(TAG, String.format("hideProgressBar: %s", e.getMessage()));
+        }
+    }
+}
